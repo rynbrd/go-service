@@ -61,8 +61,17 @@ func (r Response) Success() bool {
 
 // Event is sent by a Service on a state change.
 type Event struct {
-	Service *Service
-	State   string
+	Service *Service // The service from which the event originated.
+	State   string   // The new state of the service.
+	Error   error    // An error indicating why the service is in Exited or Backoff.
+}
+
+// ExitError indicated why the service entered an Exited or Backoff state.
+type ExitError string
+
+// Error returns the error message of the ExitError.
+func (err ExitError) Error() string {
+	return string(err)
 }
 
 // Service represents a controllable process. Exported fields may be set to configure the service.
@@ -126,8 +135,13 @@ func (s Service) makeCommand() *exec.Cmd {
 }
 
 func (s *Service) Run(commands <-chan Command, events chan<- Event) {
+	type ProcessState struct {
+		State string
+		Error error
+	}
+
 	var lastCommand *Command
-	states := make(chan string)
+	states := make(chan ProcessState)
 	quit := make(chan bool, 2)
 	kill := make(chan int, 2)
 	retries := 0
@@ -138,9 +152,9 @@ func (s *Service) Run(commands <-chan Command, events chan<- Event) {
 		close(kill)
 	}()
 
-	sendEvent := func(state string) {
+	sendEvent := func(state string, err error) {
 		s.state = state
-		events <- Event{s, state}
+		events <- Event{s, state, err}
 	}
 
 	sendInvalidCmd := func(cmd *Command, state string) {
@@ -155,19 +169,33 @@ func (s *Service) Run(commands <-chan Command, events chan<- Event) {
 			return
 		}
 
-		sendEvent(Starting)
+		sendEvent(Starting, nil)
 		go func() {
 			s.command = s.makeCommand()
 			startTime := time.Now()
-			if err := s.command.Start(); err == nil { //TODO: Don't swallow this error.
-				states <- Running
-				s.command.Wait()
-				if time.Now().Sub(startTime) > s.StartTimeout {
-					states <- Backoff
-					return
+			if err := s.command.Start(); err == nil {
+				states <- ProcessState{Running, nil}
+				exitErr := s.command.Wait()
+
+				msg := ""
+				if time.Now().Sub(startTime) < s.StartTimeout {
+					if exitErr == nil {
+						msg = "process exited prematurely with success"
+					} else {
+						msg = fmt.Sprintf("process exited prematurely with failure: %s", exitErr)
+					}
+					states <- ProcessState{Backoff, ExitError(msg)}
+				} else {
+					if exitErr == nil {
+						msg = "process exited normally with success"
+					} else {
+						msg = fmt.Sprintf("process exited normally with failure: %s", exitErr)
+					}
+					states <- ProcessState{Exited, ExitError(msg)}
 				}
+			} else {
+				states <- ProcessState{Exited, err}
 			}
-			states <- Exited
 		}()
 	}
 
@@ -177,7 +205,7 @@ func (s *Service) Run(commands <-chan Command, events chan<- Event) {
 			return
 		}
 
-		sendEvent(Stopping)
+		sendEvent(Stopping, nil)
 		pid := s.Pid()
 		s.command.Process.Signal(s.StopSignal) //TODO: Check for error.
 		go func() {
@@ -205,7 +233,7 @@ func (s *Service) Run(commands <-chan Command, events chan<- Event) {
 	}
 
 	onRunning := func(cmd *Command) {
-		sendEvent(Running)
+		sendEvent(Running, nil)
 		if cmd != nil {
 			switch cmd.Name {
 			case Start:
@@ -219,7 +247,7 @@ func (s *Service) Run(commands <-chan Command, events chan<- Event) {
 	}
 
 	onStopped := func(cmd *Command) {
-		sendEvent(Stopped)
+		sendEvent(Stopped, nil)
 		if cmd != nil {
 			switch cmd.Name {
 			case Restart:
@@ -232,20 +260,20 @@ func (s *Service) Run(commands <-chan Command, events chan<- Event) {
 		}
 	}
 
-	onExited := func(cmd *Command) {
-		sendEvent(Exited)
+	onExited := func(cmd *Command, err error) {
+		sendEvent(Exited, err)
 		if s.StopRestart {
 			start(cmd)
 		}
 	}
 
-	onBackoff := func(cmd *Command) {
+	onBackoff := func(cmd *Command, err error) {
 		if retries < s.StartRetries {
-			sendEvent(Backoff)
+			sendEvent(Backoff, err)
 			start(cmd)
 			retries++
 		} else {
-			sendEvent(Exited)
+			sendEvent(Exited, err)
 			retries = 0
 		}
 	}
@@ -255,17 +283,17 @@ loop:
 		select {
 		case state := <-states:
 			// running, exited
-			switch state {
+			switch state.State {
 			case Running:
 				onRunning(lastCommand)
 			case Exited:
 				if s.state == Stopping {
 					onStopped(lastCommand)
 				} else {
-					onExited(lastCommand)
+					onExited(lastCommand, state.Error)
 				}
 			case Backoff:
-				onBackoff(lastCommand)
+				onBackoff(lastCommand, state.Error)
 			}
 			if lastCommand != nil {
 				if lastCommand.Name == Restart && s.state == Running {
@@ -275,7 +303,7 @@ loop:
 				}
 			}
 		case command := <-commands:
-			if lastCommand == nil || lastCommand.Name != Shutdown { // Shutdown cannot be overriden!
+			if lastCommand == nil || lastCommand.Name != Shutdown {
 				switch command.Name {
 				case Start:
 					start(&command)
