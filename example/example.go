@@ -21,13 +21,13 @@ func main() {
 	go svc.Run(commands, events)
 	go func() {
 		commands <- service.Command{service.Start, responses}
-		time.Sleep(5*time.Second)
+		time.Sleep(5 * time.Second)
 		commands <- service.Command{service.Restart, responses}
-		time.Sleep(5*time.Second)
+		time.Sleep(5 * time.Second)
 		commands <- service.Command{service.Stop, responses}
-		time.Sleep(5*time.Second)
+		time.Sleep(5 * time.Second)
 		commands <- service.Command{service.Start, responses}
-		time.Sleep(15*time.Second)
+		time.Sleep(15 * time.Second)
 		commands <- service.Command{service.Shutdown, responses}
 	}()
 
