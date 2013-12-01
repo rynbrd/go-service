@@ -13,10 +13,11 @@ import (
 
 const (
 	// Service defaults.
-	DefaultStopSignal  = syscall.SIGINT
-	DefaultStopTimeout = 5 * time.Second
-	DefaultRestart     = true
-	DefaultRetries     = 3
+	DefaultStartTimeout = 1 * time.Second
+	DefaultStartRetries = 3
+	DefaultStopSignal   = syscall.SIGINT
+	DefaultStopTimeout  = 5 * time.Second
+	DefaultStopRestart  = true
 
 	// Service commands.
 	Start    = "start"
@@ -30,7 +31,7 @@ const (
 	Stopping = "stopping"
 	Stopped  = "stopped"
 	Exited   = "exited"
-	//TODO: Implement Backoff state.
+	Backoff  = "backoff"
 )
 
 // Command is sent to a Service to initiate a state change.
@@ -66,17 +67,18 @@ type Event struct {
 
 // Service represents a controllable process. Exported fields may be set to configure the service.
 type Service struct {
-	Directory   string         // The process's working directory. Defaults to the current directory.
-	Environment []string       // The environment of the process. Defaults to nil which indicatesA the current environment.
-	StopSignal  syscall.Signal // The signal to send when stopping the process. Defaults to SIGINT.
-	StopTimeout time.Duration  // How long to wait for a process to stop before sending a SIGKILL. Defaults to 5s.
-	Restart     bool           // Whether or not to restart the process if it exits unexpectedly. Defaults to true.
-	Retries     int            // How many times to restart a process if it fails to start. Defaults to 3.
-	Stdout      io.Writer      // Where to send the process's stdout. Defaults to /dev/null.
-	Stderr      io.Writer      // Where to send the process's stderr. Defaults to /dev/null.
-	args        []string       // The command line of the process to run.
-	command     *exec.Cmd      // The os/exec command running the process.
-	state       string         // The state of the Service.
+	Directory    string         // The process's working directory. Defaults to the current directory.
+	Environment  []string       // The environment of the process. Defaults to nil which indicatesA the current environment.
+	StartTimeout time.Duration  // How long the process has to run before it's considered Running.
+	StartRetries int            // How many times to restart a process if it fails to start. Defaults to 3.
+	StopSignal   syscall.Signal // The signal to send when stopping the process. Defaults to SIGINT.
+	StopTimeout  time.Duration  // How long to wait for a process to stop before sending a SIGKILL. Defaults to 5s.
+	StopRestart  bool           // Whether or not to restart the process if it exits unexpectedly. Defaults to true.
+	Stdout       io.Writer      // Where to send the process's stdout. Defaults to /dev/null.
+	Stderr       io.Writer      // Where to send the process's stderr. Defaults to /dev/null.
+	args         []string       // The command line of the process to run.
+	command      *exec.Cmd      // The os/exec command running the process.
+	state        string         // The state of the Service.
 }
 
 // New creates a new service with the default configution.
@@ -85,10 +87,11 @@ func NewService(args []string) (svc *Service, err error) {
 		svc = &Service{
 			cwd,
 			nil,
+			DefaultStartTimeout,
+			DefaultStartRetries,
 			DefaultStopSignal,
 			DefaultStopTimeout,
-			DefaultRestart,
-			DefaultRetries,
+			DefaultStopRestart,
 			nil,
 			nil,
 			args,
@@ -122,25 +125,6 @@ func (s Service) makeCommand() *exec.Cmd {
 	return cmd
 }
 
-func (s *Service) startProcess(states chan string) (err error) {
-	defer func() {
-		if err != nil {
-			//TODO: Do something with this error.
-			states <- Exited
-		}
-	}()
-
-	s.command = s.makeCommand()
-	if err = s.command.Start(); err != nil {
-		return
-	}
-
-	states <- Running
-	s.command.Wait()
-	states <- Exited
-	return
-}
-
 func (s *Service) Run(commands <-chan Command, events chan<- Event) {
 	var lastCommand *Command
 	states := make(chan string)
@@ -166,13 +150,25 @@ func (s *Service) Run(commands <-chan Command, events chan<- Event) {
 	}
 
 	start := func(cmd *Command) {
-		if s.state != Stopped && s.state != Exited {
+		if s.state != Stopped && s.state != Exited && s.state != Backoff {
 			sendInvalidCmd(cmd, Starting)
 			return
 		}
 
 		sendEvent(Starting)
-		go s.startProcess(states)
+		go func() {
+			s.command = s.makeCommand()
+			startTime := time.Now()
+			if err := s.command.Start(); err == nil { //TODO: Don't swallow this error.
+				states <- Running
+				s.command.Wait()
+				if time.Now().Sub(startTime) > s.StartTimeout {
+					states <- Backoff
+					return
+				}
+			}
+			states <- Exited
+		}()
 	}
 
 	stop := func(cmd *Command) {
@@ -220,7 +216,6 @@ func (s *Service) Run(commands <-chan Command, events chan<- Event) {
 				stop(cmd)
 			}
 		}
-		retries = 0
 	}
 
 	onStopped := func(cmd *Command) {
@@ -237,13 +232,22 @@ func (s *Service) Run(commands <-chan Command, events chan<- Event) {
 		}
 	}
 
-	onExited := func(cmd *Command, retries int) bool {
+	onExited := func(cmd *Command) {
 		sendEvent(Exited)
-		if s.Restart && retries < s.Retries {
+		if s.StopRestart {
 			start(cmd)
-			return true
 		}
-		return false
+	}
+
+	onBackoff := func(cmd *Command) {
+		if retries < s.StartRetries {
+			sendEvent(Backoff)
+			start(cmd)
+			retries++
+		} else {
+			sendEvent(Exited)
+			retries = 0
+		}
 	}
 
 loop:
@@ -258,10 +262,10 @@ loop:
 				if s.state == Stopping {
 					onStopped(lastCommand)
 				} else {
-					if onExited(lastCommand, retries) {
-						retries++
-					}
+					onExited(lastCommand)
 				}
+			case Backoff:
+				onBackoff(lastCommand)
 			}
 			if lastCommand != nil {
 				if lastCommand.Name == Restart && s.state == Running {
