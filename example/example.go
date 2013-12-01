@@ -35,7 +35,11 @@ loop:
 	for {
 		select {
 		case event := <-events:
-			fmt.Printf("service is %s\n", event.State)
+			if event.Error == nil {
+				fmt.Printf("service is %s\n", event.State)
+			} else {
+				fmt.Printf("service is %s: %s\n", event.State, event.Error)
+			}
 		case response := <-responses:
 			if response.Success() {
 				fmt.Printf("command %s succeeded\n", response.Name)
