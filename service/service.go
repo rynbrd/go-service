@@ -32,6 +32,7 @@ const (
 	Stopped  = "stopped"
 	Exited   = "exited"
 	Backoff  = "backoff"
+	Fatal    = "fatal"
 )
 
 // Command is sent to a Service to initiate a state change.
@@ -173,7 +174,7 @@ func (s *Service) Run(commands <-chan Command, events chan<- Event) {
 		case Start:
 			if state == Running {
 				sendResponse(nil)
-			} else if state == Exited {
+			} else if state == Exited || state == Fatal {
 				sendResponse(err)
 			}
 		case Stop:
@@ -190,7 +191,7 @@ func (s *Service) Run(commands <-chan Command, events chan<- Event) {
 	}
 
 	start := func() {
-		if s.state != Stopped && s.state != Exited && s.state != Backoff {
+		if s.state != Stopped && s.state != Exited && s.state != Backoff && s.state != Fatal {
 			sendResponse(invalidStateError(Starting))
 			return
 		}
@@ -270,7 +271,7 @@ func (s *Service) Run(commands <-chan Command, events chan<- Event) {
 	}
 
 	shouldQuit := func() bool {
-		return shouldShutdown() && (s.state == Stopped || s.state == Exited)
+		return shouldShutdown() && (s.state == Stopped || s.state == Exited || s.state == Fatal)
 	}
 
 	for !shouldQuit() {
@@ -278,12 +279,14 @@ func (s *Service) Run(commands <-chan Command, events chan<- Event) {
 		case state := <-states:
 			switch state.State {
 			case Running:
+				retries = 0
 				if shouldShutdown() {
 					stop()
 				} else {
 					sendEvent(Running, nil)
 				}
 			case Exited:
+				retries = 0
 				if s.state == Stopping {
 					sendEvent(Stopped, nil)
 				} else {
@@ -294,15 +297,16 @@ func (s *Service) Run(commands <-chan Command, events chan<- Event) {
 				}
 			case Backoff:
 				if s.state == Stopping {
+					retries = 0
 					sendEvent(Stopped, nil)
 				} else {
 					if retries < s.StartRetries {
+						retries++
 						sendEvent(Backoff, state.Error)
 						start()
-						retries++
 					} else {
-						sendEvent(Exited, state.Error)
 						retries = 0
+						sendEvent(Fatal, state.Error)
 					}
 				}
 			}
@@ -332,6 +336,8 @@ func (s *Service) Run(commands <-chan Command, events chan<- Event) {
 					start()
 				case Exited:
 					start()
+				case Fatal:
+					start()
 				default:
 					sendResponse(invalidStateError(Stopping))
 				}
@@ -340,7 +346,7 @@ func (s *Service) Run(commands <-chan Command, events chan<- Event) {
 				case Running:
 					stop()
 				case Backoff:
-					s.state = Exited
+					s.state = Fatal
 				}
 			}
 		case pid := <-kill:

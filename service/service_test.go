@@ -102,10 +102,10 @@ func TestService(t *testing.T) {
 	verifyStates([]string{Exited})
 	verifyCommand(Shutdown, []string{}, true)
 
-	// Received Backoff and Shutdown works after Backoff.
+	// Receives Backoff and Shutdown works after Backoff.
 	svc.StartTimeout = 3 * time.Second
 	go svc.Run(commands, events)
-	verifyCommand(Start, []string{Starting, Backoff, Starting, Backoff, Starting, Backoff, Starting, Exited}, false)
+	verifyCommand(Start, []string{Starting, Backoff, Starting, Backoff, Starting, Backoff, Starting, Fatal}, false)
 	verifyCommand(Shutdown, []string{}, true)
 	svc.StartTimeout = 1 * time.Second
 }
