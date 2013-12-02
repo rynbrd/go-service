@@ -173,6 +173,8 @@ func (s *Service) Run(commands <-chan Command, events chan<- Event) {
 		case Start:
 			if state == Running {
 				sendResponse(nil)
+			} else if state == Exited {
+				sendResponse(err)
 			}
 		case Stop:
 			if state == Stopped {
