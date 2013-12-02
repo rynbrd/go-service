@@ -225,7 +225,10 @@ func (s *Service) Run(commands <-chan Command, events chan<- Event) {
 		if lastCmd != nil {
 			lastCmd.respond(s, errors.New("service is shutting down"))
 		}
-		if s.state == Stopped || s.state == Exited {
+		if s.state == Stopped || s.state == Exited || s.state == Backoff {
+			if s.state == Backoff {
+				s.state = Exited
+			}
 			quit <- true
 		} else if s.state == Running {
 			stop(cmd)
