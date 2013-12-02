@@ -199,12 +199,30 @@ func (s *Service) Run(commands <-chan Command, events chan<- Event) {
 		go func() {
 			s.command = s.makeCommand()
 			if err := s.command.Start(); err == nil {
-				time.Sleep(s.StartTimeout)
+				waitOver := make(chan bool, 1)
+				checkOver := make(chan bool, 1)
+
+				defer func() {
+					close(waitOver)
+					close(checkOver)
+				}()
+
+				go func() {
+					time.Sleep(s.StartTimeout)
+					select {
+					case <-waitOver:
+						checkOver <-false
+					default:
+						states <- ProcessState{Running, nil}
+						checkOver <-true
+					}
+				}()
+
+				exitErr := s.command.Wait()
+				waitOver <-true
 
 				msg := ""
-				if s.Pid() > 0 {
-					states <- ProcessState{Running, nil}
-					exitErr := s.command.Wait()
+				if check := <-checkOver; check {
 					if exitErr == nil {
 						msg = "process exited normally with success"
 					} else {
@@ -212,7 +230,6 @@ func (s *Service) Run(commands <-chan Command, events chan<- Event) {
 					}
 					states <- ProcessState{Exited, ExitError(msg)}
 				} else {
-					exitErr := s.command.Wait()
 					if exitErr == nil {
 						msg = "process exited prematurely with success"
 					} else {
