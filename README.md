@@ -1,10 +1,12 @@
 Go Service!
 ===========
-The go-service library is a feture rich, channel driver wrapper around os/exec. It
+The go-service library is a channel driver wrapper around os/exec. It
 provides an event mechanism for monitoring a process and a command channel for
-controlling the process. Think supervisord in a Go library.
+controlling the process. Think supervisord in a Go library. In fact, the states
+and state transitions are identical to Supervisor. As such it is best suited
+for managing long running foreground processes.
 
-The library ABI is currently unstable as development is ongoing.
+See the example program for general usage.
 
 License
 -------
