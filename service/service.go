@@ -140,32 +140,56 @@ func (s *Service) Run(commands <-chan Command, events chan<- Event) {
 		Error error
 	}
 
-	var lastCommand *Command
+	var command *Command = nil
 	states := make(chan ProcessState)
-	quit := make(chan bool, 2)
 	kill := make(chan int, 2)
 	retries := 0
 
 	defer func() {
 		close(states)
-		close(quit)
 		close(kill)
 	}()
+
+	sendResponse := func(err error) {
+		if command != nil {
+			if command.Response != nil {
+				command.respond(s, err)
+			}
+			command = nil
+		}
+	}
 
 	sendEvent := func(state string, err error) {
 		s.state = state
 		events <- Event{s, state, err}
-	}
 
-	sendInvalidCmd := func(cmd *Command, state string) {
-		if cmd != nil {
-			cmd.respond(s, errors.New(fmt.Sprintf("invalid state transition: %s -> %s", s.state, state)))
+		if command == nil {
+			return
+		}
+
+		switch command.Name {
+		case Restart:
+			fallthrough
+		case Start:
+			if state == Running {
+				sendResponse(nil)
+			}
+		case Stop:
+			if state == Stopped {
+				sendResponse(nil)
+			} else if state == Exited {
+				sendResponse(err)
+			}
 		}
 	}
 
-	start := func(cmd *Command) {
+	invalidStateError := func(state string) error {
+		return errors.New(fmt.Sprintf("invalid state transition: %s -> %s", s.state, state))
+	}
+
+	start := func() {
 		if s.state != Stopped && s.state != Exited && s.state != Backoff {
-			sendInvalidCmd(cmd, Starting)
+			sendResponse(invalidStateError(Starting))
 			return
 		}
 
@@ -199,9 +223,9 @@ func (s *Service) Run(commands <-chan Command, events chan<- Event) {
 		}()
 	}
 
-	stop := func(cmd *Command) {
+	stop := func() {
 		if s.state != Running {
-			sendInvalidCmd(cmd, Stopping)
+			sendResponse(invalidStateError(Stopping))
 			return
 		}
 
@@ -221,115 +245,92 @@ func (s *Service) Run(commands <-chan Command, events chan<- Event) {
 		}()
 	}
 
-	shutdown := func(cmd *Command, lastCmd *Command) {
-		if lastCmd != nil {
-			lastCmd.respond(s, errors.New("service is shutting down"))
-		}
-		if s.state == Stopped || s.state == Exited || s.state == Backoff {
-			if s.state == Backoff {
-				s.state = Exited
-			}
-			quit <- true
-		} else if s.state == Running {
-			stop(cmd)
-		}
+	shouldShutdown := func() bool {
+		return command != nil && command.Name == Shutdown
 	}
 
-	onRunning := func(cmd *Command) {
-		sendEvent(Running, nil)
-		if cmd != nil {
-			switch cmd.Name {
-			case Start:
-				fallthrough
-			case Restart:
-				cmd.respond(s, nil)
-			case Shutdown:
-				stop(cmd)
-			}
-		}
+	shouldQuit := func() bool {
+		return shouldShutdown() && (s.state == Stopped || s.state == Exited)
 	}
 
-	onStopped := func(cmd *Command) {
-		sendEvent(Stopped, nil)
-		if cmd != nil {
-			switch cmd.Name {
-			case Restart:
-				start(cmd)
-			case Stop:
-				cmd.respond(s, nil)
-			case Shutdown:
-				quit <- true
-			}
-		}
-	}
-
-	onExited := func(cmd *Command, err error) {
-		sendEvent(Exited, err)
-		if s.StopRestart {
-			start(cmd)
-		}
-	}
-
-	onBackoff := func(cmd *Command, err error) {
-		if retries < s.StartRetries {
-			sendEvent(Backoff, err)
-			start(cmd)
-			retries++
-		} else {
-			sendEvent(Exited, err)
-			retries = 0
-		}
-	}
-
-loop:
-	for {
+	for !shouldQuit() {
 		select {
 		case state := <-states:
-			// running, exited
 			switch state.State {
 			case Running:
-				onRunning(lastCommand)
+				if shouldShutdown() {
+					stop()
+				} else {
+					sendEvent(Running, nil)
+				}
 			case Exited:
 				if s.state == Stopping {
-					onStopped(lastCommand)
+					sendEvent(Stopped, nil)
 				} else {
-					onExited(lastCommand, state.Error)
+					sendEvent(Exited, state.Error)
+					if s.StopRestart {
+						start()
+					}
 				}
 			case Backoff:
-				onBackoff(lastCommand, state.Error)
-			}
-			if lastCommand != nil {
-				if lastCommand.Name == Restart && s.state == Running {
-					lastCommand = nil
-				} else if lastCommand.Name != Restart && lastCommand.Name != Shutdown {
-					lastCommand = nil
+				if s.state == Stopping {
+					sendEvent(Stopped, nil)
+				} else {
+					if retries < s.StartRetries {
+						sendEvent(Backoff, state.Error)
+						start()
+						retries++
+					} else {
+						sendEvent(Exited, state.Error)
+						retries = 0
+					}
 				}
 			}
-		case command := <-commands:
-			if lastCommand == nil || lastCommand.Name != Shutdown {
-				switch command.Name {
-				case Start:
-					start(&command)
-				case Stop:
-					stop(&command)
-				case Restart:
-					stop(&command)
-				case Shutdown:
-					shutdown(&command, lastCommand)
+		case newCommand := <-commands:
+			if command != nil {
+				if newCommand.Name == Shutdown {
+					// Fail previous command to force shutdown.
+					command.respond(s, errors.New("service is shuttind down"))
+				} else {
+					// Don't allow execution of more than one command at a time.
+					newCommand.respond(s, errors.New("command %s is currently executing"))
+					continue
 				}
-				lastCommand = &command
-			} else {
-				command.respond(s, errors.New("service is shutting down"))
 			}
-		case <-quit:
-			if lastCommand != nil {
-				lastCommand.respond(s, nil)
+
+			command = &newCommand
+			switch command.Name {
+			case Start:
+				start()
+			case Stop:
+				stop()
+			case Restart:
+				switch s.state {
+				case Running:
+					stop()
+				case Stopped:
+					start()
+				case Exited:
+					start()
+				default:
+					sendResponse(invalidStateError(Stopping))
+				}
+			case Shutdown:
+				switch s.state {
+				case Running:
+					stop()
+				case Backoff:
+					s.state = Exited
+				}
 			}
-			break loop
 		case pid := <-kill:
 			if pid == s.Pid() {
 				s.command.Process.Kill() //TODO: Check for error.
 			}
 		}
+	}
+
+	if command != nil {
+		command.respond(s, nil)
 	}
 }
