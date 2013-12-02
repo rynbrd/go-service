@@ -196,26 +196,27 @@ func (s *Service) Run(commands <-chan Command, events chan<- Event) {
 		sendEvent(Starting, nil)
 		go func() {
 			s.command = s.makeCommand()
-			startTime := time.Now()
 			if err := s.command.Start(); err == nil {
-				states <- ProcessState{Running, nil}
-				exitErr := s.command.Wait()
+				time.Sleep(s.StartTimeout)
 
 				msg := ""
-				if time.Now().Sub(startTime) < s.StartTimeout {
-					if exitErr == nil {
-						msg = "process exited prematurely with success"
-					} else {
-						msg = fmt.Sprintf("process exited prematurely with failure: %s", exitErr)
-					}
-					states <- ProcessState{Backoff, ExitError(msg)}
-				} else {
+				if s.Pid() > 0 {
+					states <- ProcessState{Running, nil}
+					exitErr := s.command.Wait()
 					if exitErr == nil {
 						msg = "process exited normally with success"
 					} else {
 						msg = fmt.Sprintf("process exited normally with failure: %s", exitErr)
 					}
 					states <- ProcessState{Exited, ExitError(msg)}
+				} else {
+					exitErr := s.command.Wait()
+					if exitErr == nil {
+						msg = "process exited prematurely with success"
+					} else {
+						msg = fmt.Sprintf("process exited prematurely with failure: %s", exitErr)
+					}
+					states <- ProcessState{Backoff, ExitError(msg)}
 				}
 			} else {
 				states <- ProcessState{Exited, err}
