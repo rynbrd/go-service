@@ -77,6 +77,7 @@ func (err ExitError) Error() string {
 
 // Service represents a controllable process. Exported fields may be set to configure the service.
 type Service struct {
+	EventHook    func(*Service, string) // Function to call before an event is sent.
 	Directory    string         // The process's working directory. Defaults to the current directory.
 	Environment  []string       // The environment of the process. Defaults to nil which indicatesA the current environment.
 	StartTimeout time.Duration  // How long the process has to run before it's considered Running.
@@ -102,6 +103,7 @@ func NewService(args []string) (svc *Service, err error) {
 			DefaultStopSignal,
 			DefaultStopTimeout,
 			DefaultStopRestart,
+			nil,
 			nil,
 			nil,
 			args,
@@ -161,6 +163,9 @@ func (s *Service) Run(commands <-chan Command, events chan<- Event) {
 	}
 
 	sendEvent := func(state string, err error) {
+		if s.EventHook != nil {
+			s.EventHook(s, state)
+		}
 		s.state = state
 		events <- Event{s, state, err}
 
