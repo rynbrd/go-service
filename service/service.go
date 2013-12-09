@@ -77,19 +77,19 @@ func (err ExitError) Error() string {
 
 // Service represents a controllable process. Exported fields may be set to configure the service.
 type Service struct {
+	Directory    string                 // The process's working directory. Defaults to the current directory.
+	Environment  []string               // The environment of the process. Defaults to nil which indicatesA the current environment.
+	StartTimeout time.Duration          // How long the process has to run before it's considered Running.
+	StartRetries int                    // How many times to restart a process if it fails to start. Defaults to 3.
+	StopSignal   syscall.Signal         // The signal to send when stopping the process. Defaults to SIGINT.
+	StopTimeout  time.Duration          // How long to wait for a process to stop before sending a SIGKILL. Defaults to 5s.
+	StopRestart  bool                   // Whether or not to restart the process if it exits unexpectedly. Defaults to true.
+	Stdout       io.Writer              // Where to send the process's stdout. Defaults to /dev/null.
+	Stderr       io.Writer              // Where to send the process's stderr. Defaults to /dev/null.
 	EventHook    func(*Service, string) // Function to call before an event is sent.
-	Directory    string         // The process's working directory. Defaults to the current directory.
-	Environment  []string       // The environment of the process. Defaults to nil which indicatesA the current environment.
-	StartTimeout time.Duration  // How long the process has to run before it's considered Running.
-	StartRetries int            // How many times to restart a process if it fails to start. Defaults to 3.
-	StopSignal   syscall.Signal // The signal to send when stopping the process. Defaults to SIGINT.
-	StopTimeout  time.Duration  // How long to wait for a process to stop before sending a SIGKILL. Defaults to 5s.
-	StopRestart  bool           // Whether or not to restart the process if it exits unexpectedly. Defaults to true.
-	Stdout       io.Writer      // Where to send the process's stdout. Defaults to /dev/null.
-	Stderr       io.Writer      // Where to send the process's stderr. Defaults to /dev/null.
-	args         []string       // The command line of the process to run.
-	command      *exec.Cmd      // The os/exec command running the process.
-	state        string         // The state of the Service.
+	args         []string               // The command line of the process to run.
+	command      *exec.Cmd              // The os/exec command running the process.
+	state        string                 // The state of the Service.
 }
 
 // New creates a new service with the default configution.
@@ -217,15 +217,15 @@ func (s *Service) Run(commands <-chan Command, events chan<- Event) {
 					time.Sleep(s.StartTimeout)
 					select {
 					case <-waitOver:
-						checkOver <-false
+						checkOver <- false
 					default:
 						states <- ProcessState{Running, nil}
-						checkOver <-true
+						checkOver <- true
 					}
 				}()
 
 				exitErr := s.command.Wait()
-				waitOver <-true
+				waitOver <- true
 
 				msg := ""
 				if check := <-checkOver; check {
