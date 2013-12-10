@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -108,4 +109,19 @@ func TestService(t *testing.T) {
 	verifyCommand(Start, []string{Starting, Backoff, Starting, Backoff, Starting, Backoff, Starting, Fatal}, false)
 	verifyCommand(Shutdown, []string{}, true)
 	svc.StartTimeout = 1 * time.Second
+
+	// Receives nothing on command error.
+	svc.state = Stopped
+	svc.CommandHook = func(svc *Service, command string) (err error) {
+		if command != Shutdown {
+			err = errors.New("oops")
+		}
+		return
+	}
+	go svc.Run(commands, events)
+	verifyCommand(Start, []string{}, false)
+	if svc.State() != Stopped {
+		t.Errorf("svc.State() => %s, wanted %s", svc.State(), Stopped)
+	}
+	verifyCommand(Shutdown, []string{}, true)
 }
