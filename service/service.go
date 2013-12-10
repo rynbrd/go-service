@@ -78,7 +78,7 @@ func (err ExitError) Error() string {
 // Service represents a controllable process. Exported fields may be set to configure the service.
 type Service struct {
 	Directory    string                 // The process's working directory. Defaults to the current directory.
-	Environment  []string               // The environment of the process. Defaults to nil which indicatesA the current environment.
+	Environment  []string               // The environment of the process. Defaults to nil which indicates the current environment.
 	StartTimeout time.Duration          // How long the process has to run before it's considered Running.
 	StartRetries int                    // How many times to restart a process if it fails to start. Defaults to 3.
 	StopSignal   syscall.Signal         // The signal to send when stopping the process. Defaults to SIGINT.
