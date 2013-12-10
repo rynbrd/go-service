@@ -86,7 +86,7 @@ type Service struct {
 	StopRestart  bool                   // Whether or not to restart the process if it exits unexpectedly. Defaults to true.
 	Stdout       io.Writer              // Where to send the process's stdout. Defaults to /dev/null.
 	Stderr       io.Writer              // Where to send the process's stderr. Defaults to /dev/null.
-	EventHook    func(*Service, string) // Function to call before an event is sent.
+	CommandHook  func(*Service, string) error // Function to call before executing a command. Will cancel the command on error.
 	args         []string               // The command line of the process to run.
 	command      *exec.Cmd              // The os/exec command running the process.
 	state        string                 // The state of the Service.
@@ -163,9 +163,6 @@ func (s *Service) Run(commands <-chan Command, events chan<- Event) {
 	}
 
 	sendEvent := func(state string, err error) {
-		if s.EventHook != nil {
-			s.EventHook(s, state)
-		}
 		s.state = state
 		events <- Event{s, state, err}
 
@@ -319,7 +316,7 @@ func (s *Service) Run(commands <-chan Command, events chan<- Event) {
 			if command != nil {
 				if newCommand.Name == Shutdown {
 					// Fail previous command to force shutdown.
-					command.respond(s, errors.New("service is shuttind down"))
+					command.respond(s, errors.New("service is shutting down"))
 				} else {
 					// Don't allow execution of more than one command at a time.
 					newCommand.respond(s, errors.New("command %s is currently executing"))
@@ -328,6 +325,13 @@ func (s *Service) Run(commands <-chan Command, events chan<- Event) {
 			}
 
 			command = &newCommand
+			if s.CommandHook != nil {
+				if err := s.CommandHook(s, command.Name); err != nil {
+					sendResponse(err)
+					continue
+				}
+			}
+
 			switch command.Name {
 			case Start:
 				start()
